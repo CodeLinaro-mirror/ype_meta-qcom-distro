@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
 # set_bb_env.sh
@@ -43,26 +43,30 @@ if [ -e "$WS/layers/openembedded-core" ]; then
 fi
 
 apply_poky_patches () {
+    cp -r ${WS}/layers/meta-qcom-distro/poky_patches ${WS}/layers/poky
+
     cd ${WS}/layers/poky
+    for patchfile in $(cat poky_patches/series); do
+        patch -p1 -N --dry-run --silent < poky_patches/$patchfile > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            patch -p1 -N --silent < poky_patches/$patchfile > /dev/null 2>&1
+        else
+           echo " $patchfile ... patch Failed to apply, ignoring"
+        fi
+    done
 
-    patchfile='0001-fetch2-git-Add-verbose-logging-support.patch'
-    wget -nv https://artifacts.codelinaro.org/artifactory/codelinaro-le/$patchfile
-    git apply --check $patchfile
-    if [ $? != 0 ] ; then
-        echo " $patchfile ... patch Failed to apply, ignoring"
-    else
-        git apply $patchfile
+    if [ -d "${WS}/layers/poky/poky_patches" ]; then
+        rm -Rf ${WS}/layers/poky/poky_patches || true
     fi
-    rm $patchfile
-
-    cd -
+    cd ${WS}
 }
+
 
 # Eventually we need to call oe-init-build-env to finalize the configuration
 # of the newly created build folder
 init_build_env () {
     # Let bitbake use the following env-vars as if they were pre-set bitbake ones.
-    BB_ENV_PASSTHROUGH_ADDITIONS="DEBUG_BUILD PERFORMANCE_BUILD FWZIP_PATH CUST_ID BB_GIT_VERBOSE_FETCH QCOM_SELECTED_BSP"
+    BB_ENV_PASSTHROUGH_ADDITIONS="DEBUG_BUILD PERFORMANCE_BUILD FWZIP_PATH CUST_ID BB_GIT_VERBOSE_FETCH PREBUILT_SRC_DIR QCOM_SELECTED_BSP"
     apply_poky_patches &> /dev/null
     # Yocto/OE-core works a bit differently than OE-classic. We're going
     # to source the OE build environment setup script that Yocto provided.
@@ -90,7 +94,7 @@ read uitool <<< "$(which whiptail dialog 2> /dev/null)"
 
 # create a common list of "<machine>(<layer>)", sorted by <machine>
 # Restrict to meta-qcom-hwe machines
-MACHLAYERS=$(find layers -print | grep "meta-qcom-hwe/conf/machine/.*\.conf" | sed -e 's/\.conf//g' -e 's/layers\///' | awk -F'/conf/machine/' '{print $NF "(" $1 ")"}' | LANG=C sort)
+MACHLAYERS=$(find layers -print | grep "meta-qti-telematics/conf/machine/.*\.conf" | sed -e 's/\.conf//g' -e 's/layers\///' | awk -F'/conf/machine/' '{print $NF "(" $1 ")"}' | LANG=C sort)
 
 if [ -n "${MACHLAYERS}" ] && [ -z "${MACHINE}" ]; then
     for ITEM in $MACHLAYERS; do
@@ -185,14 +189,7 @@ fi
 mkdir -p "${BUILDDIR}"/conf
 
 ##### bblayers.conf #####
-cat >| ${BUILDDIR}/conf/bblayers.conf <<EOF
-# This configuration file is dynamically generated every time
-# set_bb_env.sh is sourced to set up a workspace.  DO NOT EDIT.
-#--------------------------------------------------------------
-EOF
-if [ -e ${WS}/layers/meta-qcom-distro/conf/bblayers.conf ]; then
-    cat ${WS}/layers/meta-qcom-distro/conf/bblayers.conf >> ${BUILDDIR}/conf/bblayers.conf
-fi
+python ${WS}/layers/meta-qcom-distro/get_bblayers.py "meta*" --lookup-paths ${WS}/layers --with-layer-check >| ${BUILDDIR}/conf/bblayers.conf
 
 # If EXTRALAYERS are avilable update them
 if [ -n "${EXTRALAYERS}" ]; then
@@ -251,6 +248,39 @@ EOF
 if [ -z "$QCOM_SELECTED_BSP" ]; then
     QCOM_SELECTED_BSP='custom'
 fi
+
+if [ "${QCOM_SELECTED_BSP}" = "custom" ]; then
+    cat >> ${BUILDDIR}/conf/auto.conf <<EOF
+# Path to look for local synced sources
+WORKSPACE = "${WS}/sources"
+
+EOF
+fi
+
+# Preserve explicit prebuilt source path for BitBake config parsing.
+if [ -n "$PREBUILT_SRC_DIR" ]; then
+            cat >> ${BUILDDIR}/conf/auto.conf <<EOF
+# Path to prebuilt sources
+PREBUILT_SRC_DIR = "${PREBUILT_SRC_DIR}"
+
+EOF
+fi
+
+# Generate and include prebuilt configuration if internal helper is available.
+# Required for builds that use PREBUILT_SRC_DIR, for example HY11 prebuilts.
+source "$WS/layers/meta-qcom-distro/generate_prebuilt_confs.sh"
+
+
+# include generated prebuilt conf in auto.conf
+cat >> ${BUILDDIR}/conf/auto.conf <<EOF
+
+#----------------------------------------
+# Include prebuilt configuration files
+#----------------------------------------
+include conf/generic_prebuilts.conf
+include conf/${MACHINE}_prebuilts.conf
+
+EOF
 
 # Update QCOM_SELECTED_BSP in auto.conf
 cat >> ${BUILDDIR}/conf/auto.conf <<EOF
